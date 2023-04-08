@@ -54,10 +54,12 @@ Sk.Debugger.prototype.move_down_the_stack = function() {
 
 Sk.Debugger.prototype.enable_step_mode = function() {
     this.step_mode = true;
+    window.Sk.stepMode = true; //set custom global attr
 };
 
 Sk.Debugger.prototype.disable_step_mode = function() {
     this.step_mode = false;
+    window.Sk.stepMode = false; //set custom global attr
 };
 
 Sk.Debugger.prototype.get_suspension_stack = function() {
@@ -78,6 +80,9 @@ Sk.Debugger.prototype.generate_breakpoint_key = function(filename, lineno, colno
 };
 
 Sk.Debugger.prototype.check_breakpoints = function(filename, lineno, colno, globals, locals) {
+    // set current line in global custom attr
+    Sk.currentLine = lineno;
+
     // If Step mode is enabled then ignore breakpoints since we will just break
     // at every line.
     if (this.step_mode === true) {
@@ -182,8 +187,7 @@ Sk.Debugger.prototype.set_suspension = function(suspension) {
         
     // Pop the last suspension of the stack if there is more than 0
     if (this.suspension_stack.length > 0) {
-        this.suspension_stack.pop();
-        this.current_suspension -= 1;
+        this.pop_suspension_stack();
     }
     
     // Unroll the stack to get each suspension.
@@ -217,7 +221,7 @@ Sk.Debugger.prototype.suspension_handler = function(susp) {
     });
 };
 
-Sk.Debugger.prototype.resume = function() {
+Sk.Debugger.prototype.resume = async function() { // make async to handle `wait`
     // Reset the suspension stack to the topmost
     this.current_suspension = this.suspension_stack.length - 1;
     
@@ -226,6 +230,7 @@ Sk.Debugger.prototype.resume = function() {
     } else {
         var promise = this.suspension_handler(this.get_active_suspension());
         promise.then(this.success.bind(this), this.error.bind(this));
+        await promise.then(await this.success.bind(this), this.error.bind(this)); // have to wait for animations in turtle
     }
 };
 
@@ -234,15 +239,27 @@ Sk.Debugger.prototype.pop_suspension_stack = function() {
     this.current_suspension -= 1;
 };
 
-Sk.Debugger.prototype.success = function(r) {
-    if (r instanceof Sk.misceval.Suspension) {
+Sk.Debugger.prototype.success = async function(r) { // make async to handle `wait`
+    if(Sk.stopLimit) { // add to handle stopLimit
+        this.error( Sk.customRuntimeError('Stopped') );
+    }
+    else if (r instanceof Sk.misceval.Suspension) {
         this.set_suspension(r);
+
+        if(r.data.type == 'Sk.promise') {
+            this.output_callback.current_line(r.$lineno - 1) //current line is done, only promise is missing
+            //waiting does not realy work. but it contiues with the code
+            //https://github.com/skulpt/skulpt/blob/master/doc/suspensions.txt
+            // 'Sk.promise' is raised by turtle for example to wait for animation
+            await r.data.promise.then(await this.success.bind(this), this.error.bind(this));
+        }
     } else {
         if (this.suspension_stack.length > 0) {
             // Current suspension needs to be popped of the stack
             this.pop_suspension_stack();
             
             if (this.suspension_stack.length === 0) {
+                this.output_callback.success(); // added
                 this.print("Program execution complete");
                 return;
             }
@@ -261,6 +278,12 @@ Sk.Debugger.prototype.success = function(r) {
 };
 
 Sk.Debugger.prototype.error = function(e) {
+    // log error
+    console.log(e);
+
+    // reset stop flag
+    Sk.stopLimit = false;
+
     this.print("Traceback (most recent call last):");
     for (var idx = 0; idx < e.traceback.length; ++idx) {
         this.print("  File \"" + e.traceback[idx].filename + "\", line " + e.traceback[idx].lineno + ", in <module>");
@@ -274,6 +297,12 @@ Sk.Debugger.prototype.error = function(e) {
     for (idx = 0; idx < e.args.v.length; ++idx) {
         this.print(err_ty + ": " + e.args.v[idx].v);
     }
+
+    // end active run
+    this.suspension_stack = [];
+    this.current_suspension = -1;
+
+    return this.output_callback.error(e);
 };
 
 Sk.Debugger.prototype.asyncToPromise = function(suspendablefn, suspHandlers, debugger_obj) {

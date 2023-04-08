@@ -582,6 +582,7 @@ Compiler.prototype.cyield = function(e) {
     }
     nextBlock = this.newBlock("after yield");
     // return a pair: resume target block and yielded value
+    out("Sk._frame = $prevframe;");
     out("return [/*resume*/", nextBlock, ",/*ret*/", val, "];");
     this.setBlock(nextBlock);
     return "$gen.gi$sentvalue"; // will either be none if none sent, or the value from gen.send(value)
@@ -1266,7 +1267,7 @@ Compiler.prototype.outputSuspensionHelpers = function (unit) {
         }
     }
 
-    output +=  "try { $ret=susp.child.resume(); } catch(err) { if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if($exc.length>0) { $err=err; $blk=$exc.pop(); } else { throw err; } }" +
+    output +=  "try { $ret=susp.child.resume(); } catch(err) { if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if($exc.length>0) { $err=err; $blk=$exc.pop(); } else { Sk._frame = $prevframe; throw err; } }" +
                 "};";
 
     output += "var $saveSuspension = function($child, $filename, $lineno, $colno) {" +
@@ -1274,7 +1275,7 @@ Compiler.prototype.outputSuspensionHelpers = function (unit) {
                 "susp.resume=function(){"+unit.scopename+".$wakingSuspension=susp; return "+unit.scopename+"("+(unit.ste.generator?"$gen":"")+"); };" +
                 "susp.data=susp.child.data;susp.$blk=$blk;susp.$loc=$loc;susp.$gbl=$gbl;susp.$exc=$exc;susp.$err=$err;susp.$postfinally=$postfinally;" +
                 "susp.$filename=$filename;susp.$lineno=$lineno;susp.$colno=$colno;" +
-                "susp.optional=susp.child.optional;" +
+                "susp.optional=susp.child.optional;susp.$prevframe = $prevframe;" +
                 (hasCell ? "susp.$cell=$cell;" : "");
 
     seenTemps = {};
@@ -2050,7 +2051,8 @@ Compiler.prototype.buildcodeobj = function (n, coname, decorator_list, args, cal
     // note special usage of 'this' to avoid having to slice globals into
     // all function invocations in call
     // (fastcall doesn't need to do this, as 'this' is the func object)
-    this.u.varDeclsCode += "var $blk=" + entryBlock + ",$exc=[],$loc=" + locals + cells + ",$gbl=" +(fastCall?"this && this.func_globals":"this") + ((fastCall&&hasFree)?",$free=this && this.func_closure":"") + ",$err=undefined,$ret=undefined,$postfinally=undefined,$currLineNo=undefined,$currColNo=undefined;";
+    this.u.varDeclsCode += "var $blk=" + entryBlock + ",$exc=[],$loc=" + locals + cells + ",$gbl=" +(fastCall?"this && this.func_globals":"this") + ((fastCall&&hasFree)?",$free=this && this.func_closure":"") + ",$err=undefined,$ret=undefined,$postfinally=undefined,$currLineNo=undefined,$currColNo=undefined";
+    this.u.varDeclsCode += ", $prevframe = Sk._frame, $args=undefined, $argNames=[];"; // declare $args to access global and $argNames to store names
     if (Sk.execLimit !== null) {
         this.u.varDeclsCode += "if (typeof Sk.execStart === 'undefined') {Sk.execStart = Date.now()}";
     }
@@ -2069,12 +2071,13 @@ Compiler.prototype.buildcodeobj = function (n, coname, decorator_list, args, cal
         // If we're posargs-only, we can handle the fast path
         // without even calling out
         if (!kwarg && !vararg && (!args || !args.kwonlyargs || args.kwonlyargs.length === 0)) {
-            this.u.varDeclsCode += "var $args = ((!$kwargs || $kwargs.length===0) && $posargs.length===" + funcArgs.length + ") ? $posargs : this.$resolveArgs($posargs,$kwargs)";
+            this.u.varDeclsCode += "$args = ((!$kwargs || $kwargs.length===0) && $posargs.length===" + funcArgs.length + ") ? $posargs : this.$resolveArgs($posargs,$kwargs)";
         } else {
-            this.u.varDeclsCode += "\nvar $args = this.$resolveArgs($posargs,$kwargs)\n";
+            this.u.varDeclsCode += "\$args = this.$resolveArgs($posargs,$kwargs)\n";
         }
         for (let i = 0; i < funcArgs.length; i++) {
             this.u.varDeclsCode += "," + funcArgs[i] + "=$args[" + i + "]";
+            this.u.varDeclsCode += ",$argNames.push('" + funcArgs[i] + "')"; // push arg names to array
         }
         const instanceForSuper = funcArgs[kwarg ? 1 : 0];
         if (instanceForSuper) {
@@ -2141,6 +2144,8 @@ Compiler.prototype.buildcodeobj = function (n, coname, decorator_list, args, cal
     // close the else{} block from the wakingSuspension check
     //
     this.u.varDeclsCode += "}";
+    this.u.varDeclsCode += "Sk._frame = {globals: $gbl, locals: $loc};";
+    this.u.varDeclsCode += "if ($argNames.length) Sk._frame.args = $argNames.reduce((acc, cur, i) => ({ ...acc, [cur]: $args[i] }), {});";
 
     // inject __class__ cell when running python3
     if (Sk.__future__.python3 && class_for_super) {
@@ -2157,7 +2162,7 @@ Compiler.prototype.buildcodeobj = function (n, coname, decorator_list, args, cal
     this.u.switchCode = "while(true){try{";
     this.u.switchCode += this.outputInterruptTest();
     this.u.switchCode += "switch($blk){";
-    this.u.suffixCode = "} }catch(err){ if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if ($exc.length>0) { $err = err; $blk=$exc.pop(); continue; } else { throw err; }} }});";
+    this.u.suffixCode = "} }catch(err){ if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if ($exc.length>0) { $err = err; $blk=$exc.pop(); continue; } else { Sk._frame = $prevframe; throw err; }} }});";
 
     //
     // jump back to the handler so it can do the main actual work of the
@@ -2378,6 +2383,7 @@ Compiler.prototype.cfunction = function (s, class_for_super) {
     Sk.asserts.assert(s instanceof Sk.astnodes.FunctionDef);
     funcorgen = this.buildcodeobj(s, s.name, s.decorator_list, s.args, function (scopename) {
         this.vseqstmt(s.body);
+        out("Sk._frame = $prevframe;");
         out("return Sk.builtin.none.none$;"); // if we fall off the bottom, we want the ret to be None
     }, class_for_super);
     this.nameop(s.name, Sk.astnodes.Store, funcorgen);
@@ -2388,6 +2394,7 @@ Compiler.prototype.clambda = function (e) {
     Sk.asserts.assert(e instanceof Sk.astnodes.Lambda);
     func = this.buildcodeobj(e, new Sk.builtin.str("<lambda>"), null, e.args, function (scopename) {
         var val = this.vexpr(e.body);
+        out("Sk._frame = $prevframe;");
         out("return ", val, ";");
     });
     return func;
@@ -2468,6 +2475,7 @@ Compiler.prototype.cgenexpgen = function (generators, genIndex, elt) {
         this.annotateSource(elt);
 
         velt = this.vexpr(elt);
+        out("Sk._frame = $prevframe;");
         out("return [", skip, "/*resume*/,", velt, "/*ret*/];");
         this.setBlock(skip);
     }
@@ -2477,6 +2485,7 @@ Compiler.prototype.cgenexpgen = function (generators, genIndex, elt) {
     this.setBlock(end);
 
     if (genIndex === 1) {
+    	out("Sk._frame = $prevframe;");
         out("return Sk.builtin.none.none$;");
     }
 };
@@ -2516,7 +2525,8 @@ Compiler.prototype.cclass = function (s) {
 
     this.u.prefixCode = "var " + scopename + "=(function $" + s.name.v + "$class_outer($globals,$locals,$cell){var $gbl=$globals,$loc=$locals,$free=$globals;";
     this.u.switchCode += "(function $" + s.name.v + "$_closure($cell){";
-    this.u.switchCode += "var $blk=" + entryBlock + ",$exc=[],$ret=undefined,$postfinally=undefined,$currLineNo=undefined,$currColNo=undefined;";
+    this.u.switchCode += "var $blk=" + entryBlock + ",$exc=[],$ret=undefined,$postfinally=undefined,$currLineNo=undefined,$currColNo=undefined, $prevframe = Sk._frame;";
+	this.u.switchCode += "Sk._frame = {globals: $gbl, locals: $loc};";
 
     if (Sk.execLimit !== null) {
         this.u.switchCode += "if (typeof Sk.execStart === 'undefined') {Sk.execStart = Date.now()}";
@@ -2528,12 +2538,13 @@ Compiler.prototype.cclass = function (s) {
     this.u.switchCode += "while(true){try{";
     this.u.switchCode += this.outputInterruptTest();
     this.u.switchCode += "switch($blk){";
-    this.u.suffixCode = "}}catch(err){ if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if ($exc.length>0) { $err = err; $blk=$exc.pop(); continue; } else { throw err; }}}";
+    this.u.suffixCode = "}}catch(err){ if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if ($exc.length>0) { $err = err; $blk=$exc.pop(); continue; } else { Sk._frame = $prevframe; throw err; }}}";
     this.u.suffixCode += "}).call(null, $cell);});";
 
     this.u.private_ = s.name;
 
     this.cbody(s.body, s.name);
+    out("Sk._frame = $prevframe;");
     out("return;");
 
     // build class
@@ -2625,6 +2636,7 @@ Compiler.prototype.vstmt = function (s, class_for_super) {
             }
             val = s.value ? this.vexpr(s.value) : "Sk.builtin.none.none$";
             if (this.u.finallyBlocks.length == 0) {
+                out("Sk._frame = $prevframe;");
                 out("return ", val, ";");
             } else {
                 out("$postfinally={returning:",val,"};");
@@ -2788,10 +2800,10 @@ Compiler.prototype.nameop = function (name, ctx, dataToStore) {
                     out("if (", mangled, " === undefined) { throw new Sk.builtin.UnboundLocalError('local variable \\\'", mangled, "\\\' referenced before assignment'); }\n");
                     return mangled;
                 case Sk.astnodes.Store:
-                    out(mangled, "=", dataToStore, ";");
+                    out("$loc.",mangled, "=", mangled, "=", dataToStore, ";");
                     break;
                 case Sk.astnodes.Del:
-                    out("delete ", mangled, ";");
+                    out("delete $loc.", mangled, ";");
                     break;
                 default:
                     Sk.asserts.fail("unhandled");
@@ -2967,7 +2979,7 @@ Compiler.prototype.cmod = function (mod) {
     this.u.varDeclsCode =
         "var $gbl = $forcegbl || {}, $blk=" + entryBlock +
         ",$exc=[],$loc=$forceloc || $gbl,$cell={},$err=undefined;" +
-        "var $ret=undefined,$postfinally=undefined,$currLineNo=undefined,$currColNo=undefined;";
+        "var $ret=undefined,$postfinally=undefined,$currLineNo=undefined,$currColNo=undefined, $prevframe = Sk._frame;";
 
     if (Sk.execLimit !== null) {
         this.u.varDeclsCode += "if (typeof Sk.execStart === 'undefined') {Sk.execStart = Date.now()}";
@@ -2983,6 +2995,8 @@ Compiler.prototype.cmod = function (mod) {
         "    else { Sk.globals = $gbl; }" +
         "} else { Sk.globals = $gbl; }";
 
+    this.u.varDeclsCode += "Sk._frame = {globals: $gbl, locals: $loc};";
+
     // Add the try block that pops the try/except stack if one exists
     // Github Issue #38
     // Google Code Issue: 109 / 114
@@ -2996,7 +3010,7 @@ Compiler.prototype.cmod = function (mod) {
     this.u.switchCode += this.outputInterruptTest();
     this.u.switchCode += "switch($blk){";
     this.u.suffixCode = "}";
-    this.u.suffixCode += "}catch(err){ if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if ($exc.length>0) { $err = err; $blk=$exc.pop(); continue; } else { throw err; }} } });";
+    this.u.suffixCode += "}catch(err){ if (!(err instanceof Sk.builtin.BaseException)) { err = new Sk.builtin.ExternalError(err); } err.traceback.push({lineno: $currLineNo, colno: $currColNo, filename: '"+this.filename+"'}); if ($exc.length>0) { $err = err; $blk=$exc.pop(); continue; } else { Sk._frame = $prevframe; throw err; }} } });";
 
     // Note - this change may need to be adjusted for all the other instances of
     // switchCode and suffixCode in this file.  Not knowing how to test those
@@ -3014,6 +3028,7 @@ Compiler.prototype.cmod = function (mod) {
     switch (mod.constructor) {
         case Sk.astnodes.Module:
             this.cbody(mod.body);
+            out("Sk._frame = $prevframe;");
             out("return $loc;");
             break;
         default:
